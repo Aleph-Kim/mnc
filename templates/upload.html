@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}이미지 업로드 - 넘버 컬러링{% endblock %}
+
+{% block content %}
+<div class="bg-white rounded-lg shadow p-6 space-y-6">
+  <div>
+    <h1 class="text-2xl font-semibold mb-1">이미지 업로드</h1>
+    <p class="text-slate-500 text-sm">이미지를 업로드하면 추천 색상 개수가 자동으로 채워집니다.</p>
+  </div>
+
+  <form id="upload-form" class="space-y-4">
+    <div>
+      <label class="block text-sm font-medium mb-1" for="file-input">이미지 파일</label>
+      <input
+        id="file-input"
+        name="file"
+        type="file"
+        accept="image/*"
+        required
+        class="block w-full text-sm border border-slate-300 rounded-md p-2"
+      />
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium mb-1" for="color-count-input">색상 개수</label>
+      <input
+        id="color-count-input"
+        name="color_count"
+        type="number"
+        min="5"
+        max="30"
+        disabled
+        placeholder="이미지를 선택하면 추천값이 채워집니다"
+        class="block w-full text-sm border border-slate-300 rounded-md p-2 disabled:bg-slate-100"
+      />
+      <p id="recommend-hint" class="text-xs text-slate-400 mt-1"></p>
+    </div>
+
+    <button
+      id="submit-btn"
+      type="submit"
+      disabled
+      class="w-full bg-indigo-600 disabled:bg-slate-300 text-white font-medium rounded-md py-2 px-4 hover:bg-indigo-700 transition"
+    >
+      도안 생성하기
+    </button>
+  </form>
+
+  <p id="status-message" class="text-sm text-slate-500"></p>
+</div>
+
+<script>
+  const fileInput = document.getElementById("file-input");
+  const colorCountInput = document.getElementById("color-count-input");
+  const recommendHint = document.getElementById("recommend-hint");
+  const submitBtn = document.getElementById("submit-btn");
+  const statusMessage = document.getElementById("status-message");
+  const form = document.getElementById("upload-form");
+
+  let currentImageId = null;
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    currentImageId = null;
+    submitBtn.disabled = true;
+    colorCountInput.disabled = true;
+    statusMessage.textContent = "이미지 분석 중...";
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/analyze", { method: "POST", body: formData });
+      if (!res.ok) throw new Error("분석에 실패했습니다.");
+      const data = await res.json();
+
+      currentImageId = data.image_id;
+      colorCountInput.value = data.recommended_colors;
+      colorCountInput.disabled = false;
+      recommendHint.textContent = `추천 색상 개수: ${data.recommended_colors} (직접 조정 가능, 5~30)`;
+      submitBtn.disabled = false;
+      statusMessage.textContent = "";
+    } catch (err) {
+      statusMessage.textContent = err.message || "분석 중 오류가 발생했습니다.";
+    }
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!currentImageId) return;
+
+    submitBtn.disabled = true;
+    statusMessage.textContent = "도안 생성을 요청하는 중...";
+
+    try {
+      const res = await fetch("/designs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_id: currentImageId,
+          color_count: parseInt(colorCountInput.value, 10),
+        }),
+      });
+      if (!res.ok) throw new Error("도안 생성 요청에 실패했습니다.");
+      const data = await res.json();
+
+      window.location.href = `/designs/${data.id}/view`;
+    } catch (err) {
+      statusMessage.textContent = err.message || "요청 중 오류가 발생했습니다.";
+      submitBtn.disabled = false;
+    }
+  });
+</script>
+{% endblock %}
