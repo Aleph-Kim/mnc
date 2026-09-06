@@ -1,10 +1,13 @@
 import math
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from skimage.morphology import skeletonize
 
 from app.imaging.numbering import Region
+from app.imaging.quantize import to_lab, _nearest
 
 PALETTE_ROW_HEIGHT = 60
 SWATCH_SIZE = 60
@@ -15,27 +18,24 @@ def render_preview_image(
     region_labels: np.ndarray,
     palette: np.ndarray,
     line_mask: np.ndarray | None = None,
+    source_rgb: np.ndarray | None = None,
 ) -> Image.Image:
     # 색 라벨맵이 아니라 영역맵에서 칠한다. 라벨맵에는 병합으로 사라진 잔점이 그대로
     # 남아 있어서, 그걸로 미리보기를 만들면 윤곽선도 번호도 없는 색 얼룩이 보인다.
     # 즉 사용자가 번호대로 칠한 결과와 미리보기가 서로 다른 그림이 된다.
     image = palette[region_labels[region_map]]
-    if line_mask is not None:
+    if line_mask is not None and line_mask.any():
         # 인쇄되는 원화 선을 얹는다 — 사용자가 칠하는 대상은 면뿐
         image = image.copy()
-        image[line_mask] = (0, 0, 0)
+        if source_rgb is None:
+            image[line_mask] = (0, 0, 0)
+        else:
+            # Use the same solid inks as the paint palette. Copying JPEG pixels
+            # left visible patches where a stroke entered a larger filled area.
+            ink_labels = _nearest(to_lab(source_rgb[line_mask]), to_lab(palette))
+            image[line_mask] = palette[ink_labels]
     return Image.fromarray(image, mode="RGB")
 
-
-# seam이 이 비율 이상 인쇄 선에 덮이면 그 경계는 선이 담당 — seam을 그리지 않는다
-LINE_COVERS_SEAM_FRAC = 0.6
-
-# seam-덮임 판정 시 선 마스크를 넓히는 반지름. 경계 재배정이 영역 경계를 선 바깥으로
-# 살짝 밀어내므로(boundary.UNCERTAIN_RADIUS), 그만큼 여유를 둬야 이중선이 안 남는다
-LINE_NEAR_RADIUS = 3
-
-# 내부에 번호를 못 넣어도 이 면적 이상이면 바깥 번호 + 인출선으로 안내
-MIN_EXTERNAL_LABEL_AREA = 120
 
 # 이 면적을 넘는 넓은 영역은 번호를 여러 번 찍어 어느 칸인지 읽기 쉽게 한다
 REPEAT_LABEL_AREA = 60000
@@ -47,6 +47,8 @@ def render_outline_image(
     regions: list[Region],
     palette: np.ndarray,
     line_mask: np.ndarray | None = None,
+    source_rgb: np.ndarray | None = None,
+    detail_path: Path | None = None,
 ) -> tuple[Image.Image, list[dict]]:
     """윤곽선 + 번호 + 팔레트 바를 합성한다. 영역별 번호 배치 결과(reason 포함)를 함께 돌려준다."""
     h, w = shape
@@ -54,28 +56,28 @@ def render_outline_image(
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
-    line_near = None
-    if line_mask is not None:
-        k = 2 * LINE_NEAR_RADIUS + 1
-        line_near = cv2.dilate(
-            line_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        ).astype(bool)
-
+    # Draw shared face boundaries once, including at printed-ink junctions.
+    seam_pixels = np.zeros((h, w), np.uint8)
     for seam in seams:
-        if len(seam) < 2:
-            continue
-        pts = [tuple(int(v) for v in p) for p in seam]
-        if line_near is not None and _seam_covered_by_line(pts, line_near, (h, w)):
-            continue
-        draw.line(pts, fill="black", width=1)
-
-    # 원화 선을 번호보다 먼저 얹는다 — 선이 번호를 가리면 안 되므로 번호가 맨 위
+        if len(seam) >= 2:
+            cv2.polylines(seam_pixels, [np.asarray(seam, np.int32)], False, 1, 1)
     if line_mask is not None:
-        painted = np.array(canvas)
-        painted[line_mask] = (0, 0, 0)
-        canvas = Image.fromarray(painted, mode="RGB")
-        draw = ImageDraw.Draw(canvas)
+        # Shared ownership is extended to the centre of ink. These seams close
+        # the paint faces; only add free-ended ink not represented by a seam.
+        covered = cv2.dilate(seam_pixels, np.ones((9, 9), np.uint8)).astype(bool)
+        seam_pixels[skeletonize(line_mask) & ~covered] = 1
+        if source_rgb is not None:
+            # Neutral dark ink is printed solid at its original width; coloured
+            # decorative strokes use a centreline rather than black ribbons.
+            dark = source_rgb.max(axis=2) < 105
+            seam_pixels[line_mask & dark] = 1
+    painted = np.full((h, w, 3), 255, np.uint8)
+    painted[seam_pixels != 0] = 0
+    canvas = Image.fromarray(painted)
+    draw = ImageDraw.Draw(canvas)
 
+    clean_outline = canvas.copy()
+    details = []
     placed: list[tuple[float, float, float, float]] = []
     number_log: list[dict] = []
     # 넓은 영역부터 자리를 잡아, 작은 영역이 큰 영역의 유일한 자리를 뺏지 않게 한다
@@ -109,53 +111,22 @@ def render_outline_image(
                     break
 
         if done == 0:
-            if region.area >= MIN_EXTERNAL_LABEL_AREA:
-                spot = _external_spot(region.centroid, tw, th, placed, (h, w), line_mask)
-                if spot is not None:
-                    ex, ey = spot
-                    draw.line([region.centroid, (int(ex), int(ey))], fill="black", width=1)
-                    draw.text((ex - tw / 2 - b[0], ey - th / 2 - b[1]), text, fill="black", font=font)
-                    placed.append(box_at(ex, ey))
-                    entry.update(placed=True, kind="external", reason="internal placement failed")
-                else:
-                    entry["reason"] = "no internal or external spot found"
-            else:
-                entry["reason"] = "region too small for glyph"
+            details.append(region)
+            entry.update(placed=detail_path is not None, kind="detail",
+                         reason="enlarged detail sheet" if detail_path else "no readable internal spot")
         number_log.append(entry)
+
+    if detail_path is not None:
+        if details:
+            render_detail_sheet(clean_outline, details).save(detail_path)
+        else:
+            detail_path.unlink(missing_ok=True)
 
     bar = _render_palette_bar(len(palette), palette, w)
     composed = Image.new("RGB", (w, h + bar.height), "white")
     composed.paste(bar, (0, 0))
     composed.paste(canvas, (0, bar.height))
     return composed, number_log
-
-
-def _seam_covered_by_line(pts: list[tuple[int, int]], line_near: np.ndarray, shape) -> bool:
-    tmp = np.zeros(shape, dtype=np.uint8)
-    cv2.polylines(tmp, [np.array(pts, dtype=np.int32)], False, 1, 1)
-    total = int(tmp.sum())
-    if total == 0:
-        return False
-    return (tmp.astype(bool) & line_near).sum() / total >= LINE_COVERS_SEAM_FRAC
-
-
-def _external_spot(centroid, tw, th, placed, shape, line_mask):
-    """중심에서 바깥으로 링을 넓히며 번호와 선을 피한 자리를 찾는다. 인출선 목적지."""
-    h, w = shape
-    cx, cy = centroid
-    for radius in range(14, 90, 8):
-        for ang in range(0, 360, 30):
-            ex = cx + radius * math.cos(math.radians(ang))
-            ey = cy + radius * math.sin(math.radians(ang))
-            if not (tw < ex < w - tw and th < ey < h - th):
-                continue
-            box = (ex - tw / 2, ey - th / 2, ex + tw / 2, ey + th / 2)
-            if any(_boxes_overlap(box, o) for o in placed):
-                continue
-            if line_mask is not None and _box_hits_mask(box, line_mask):
-                continue
-            return ex, ey
-    return None
 
 
 def _box_hits_mask(box: tuple[float, float, float, float], mask: np.ndarray) -> bool:
@@ -191,3 +162,36 @@ def _render_palette_bar(color_count: int, palette: np.ndarray, width: int) -> Im
         draw.text((x0, y1 + 2), str(number), fill="black", font=font)
 
     return bar
+
+
+def render_detail_sheet(outline: Image.Image, regions: list[Region]) -> Image.Image:
+    """Each small face gets an enlarged crop, an inside target and a locator."""
+    cols, cell_w, cell_h = 3, 280, 260
+    sheet = Image.new("RGB", (cols * cell_w, ((len(regions) + cols - 1) // cols) * cell_h), "white")
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default(size=14)
+    for i, r in enumerate(regions):
+        ox, oy = (i % cols) * cell_w, (i // cols) * cell_h
+        cx, cy = r.label_anchor
+        half = 28
+        tile = Image.new("RGB", (2 * half, 2 * half), "white")
+        bounds = (max(0, cx-half), max(0, cy-half),
+                  min(outline.width, cx+half), min(outline.height, cy+half))
+        tile.paste(outline.crop(bounds), (bounds[0] - cx + half, bounds[1] - cy + half))
+        crop = tile.resize((168, 168), Image.Resampling.NEAREST)
+        sheet.paste(crop, (ox+8, oy+40))
+        # Crosshair identifies the exact region; the colour number is outside
+        # the crop so it cannot obscure a narrow cell.
+        tx, ty = ox+92, oy+124
+        draw.ellipse((tx-3, ty-3, tx+3, ty+3), outline="red", width=2)
+        draw.text((ox+8, oy+10), f"Color {r.number} | Detail {i+1}", fill="black", font=font)
+        thumb = outline.copy()
+        thumb.thumbnail((82, 160))
+        sx, sy = ox+188, oy+40
+        sheet.paste(thumb, (sx, sy))
+        px = sx + cx * thumb.width / outline.width
+        py = sy + cy * thumb.height / outline.height
+        draw.rectangle((px-4, py-4, px+4, py+4), outline="red", width=2)
+        draw.text((ox+8, oy+222), "Red mark = area to paint", fill="black", font=font)
+        draw.rectangle((ox, oy, ox+cell_w-1, oy+cell_h-1), outline="#cccccc")
+    return sheet

@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.core import design_store
+from app.core.storage import outputs_dir
 
 templates = Jinja2Templates(directory="templates")
 
@@ -25,5 +26,6 @@ def design_view(request: Request, design_id: str):
 def design_status_partial(request: Request, design_id: str):
     design = design_store.load(design_id)
     return templates.TemplateResponse(
-        "partials/status.html", {"request": request, "design": design}
+        "partials/status.html", {"request": request, "design": design,
+        "has_details": bool(design and (outputs_dir(design.id) / "details.png").exists())}
     )

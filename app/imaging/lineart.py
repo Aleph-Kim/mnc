@@ -3,67 +3,52 @@ import numpy as np
 
 from app.imaging.quantize import to_lab
 
-# 원화 잉크 선은 국소적으로 가장 어둡고(L 낮음) 가장 무채색(chroma 낮음)인 자리다.
-# L+chroma에 black-hat을 걸면 "주변 면보다 얼마나 어둡고 탁한가"가 나온다. JPEG·확대로
-# 검은 선이 배경(청록)과 같은 밝기까지 흐려져도, 채도가 떨어지므로 이 지표로는 잡힌다.
-# 잠정값 — octocat/clover/spongebob 스윕으로 확정 필요
-
-# black-hat 커널 반지름. 가장 굵은 외곽선 폭보다 커야 그 선을 통째로 잡는다
+# Thresholds use the pipeline's normalized working resolution.
 INK_BLACKHAT_RADIUS = 15
-
-# black-hat 값(L+chroma 단위)이 이보다 커야 선으로 본다
-INK_CONTRAST = 12.0
-
-# 선은 무채색에 가깝다. 채도가 이보다 높으면 유색 선/짙은 채도색이라 이번엔 제외
-CHROMA_MAX = 26.0
-
-# 이 반지름 원이 들어가는 어두운 덩어리는 선이 아니라 면 (동공·신발)
-MAX_LINE_HALFWIDTH = 4
-
-# 면으로 뺄 덩어리의 최소 넓이. 벨트·눈썹처럼 촘촘한 선 뭉치가 opening을 통과해도
-# 넓이가 작아 여기서 걸리고 선으로 남는다
+INK_CONTRAST = 2.5  # CIELAB luminance valley after JPEG smoothing
 MIN_FILL_AREA = 150
-
-# opening 통과 덩어리를 "면"으로 인정할 조건: 자기 bbox를 이 비율 이상 채워야 한다.
-# 외곽선 고리는 bbox가 크고 속이 비어 이 값을 못 넘어 선으로 남는다(굵은 구간 포함)
 FILL_BBOX_RATIO = 0.55
-
-# 이보다 작은 부스러기(JPEG 잡티)는 선으로 치지 않는다
 MIN_LINE_AREA = 25
+MIN_LINE_EXTENT = 22
 
 
 def detect_line_layer(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """원화의 검은 선을 별도 마스크로 뽑는다.
+    """원화의 어두운 선과 유색 선을 별도 마스크로 뽑는다.
 
     (선 마스크, 선/면 분리 전 잉크 마스크)를 돌려준다 — 두 번째는 디버그에서 어떤
     덩어리가 면으로 빠졌는지 보기 위함.
     """
     h, w = rgb.shape[:2]
     lab = to_lab(rgb.reshape(-1, 3)).reshape(h, w, 3)
-    chroma = np.sqrt(lab[:, :, 1] ** 2 + lab[:, :, 2] ** 2).astype(np.float32)
-    inkiness = np.clip((lab[:, :, 0].astype(np.float32) + chroma) * 2, 0, 255).astype(np.uint8)
+    # A stroke is a local luminance valley, including coloured ink. Smooth JPEG
+    # grain first; chroma exclusion previously missed olive and blue outlines.
+    light = cv2.GaussianBlur(lab[:, :, 0].astype(np.float32), (0, 0), 1.0)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * INK_BLACKHAT_RADIUS + 1,) * 2)
+    valley = cv2.morphologyEx(light, cv2.MORPH_BLACKHAT, kernel)
+    ink = (valley > INK_CONTRAST).astype(np.uint8)
 
-    radius = INK_BLACKHAT_RADIUS
-    blackhat = cv2.morphologyEx(
-        inkiness,
-        cv2.MORPH_BLACKHAT,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)),
-    ).astype(np.float32) / 2.0
-    ink = ((blackhat > INK_CONTRAST) & (chroma < CHROMA_MAX)).astype(np.uint8)
+    # Dark compact interiors (pupils/shoes) remain paint. Coloured strokes
+    # can be wider, so they need a larger core before being classified as fill.
+    def fill_core(radius):
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)
+        opened = cv2.morphologyEx(ink, cv2.MORPH_OPEN, k)
+        return _compact_blobs(opened.astype(bool), MIN_FILL_AREA, FILL_BBOX_RATIO)
 
-    # opening으로 이 반지름 원이 들어가는 자리(동공·신발)만 남긴다. 연결요소 단위로
-    # 빼면 굵은 모서리 하나 때문에 외곽선 전체가 면으로 사라진다
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (2 * MAX_LINE_HALFWIDTH + 1, 2 * MAX_LINE_HALFWIDTH + 1)
-    )
-    opened = cv2.dilate(cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel), np.ones((3, 3), np.uint8))
-    is_fill = _compact_blobs(opened.astype(bool), MIN_FILL_AREA, FILL_BBOX_RATIO)
+    is_fill = fill_core(12) | (fill_core(6) & (light < 35))
+    # Do not cut a compact spot in half. A complete pupil/spot is a paint
+    # component, unlike an open or hollow contour with a low bbox occupancy.
+    is_fill |= _compact_blobs(ink.astype(bool), MIN_FILL_AREA, FILL_BBOX_RATIO)
 
     line = ink.astype(bool) & ~is_fill
     line = cv2.morphologyEx(
         line.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
     ).astype(bool)
-    return _drop_small(line, MIN_LINE_AREA), ink.astype(bool)
+    line = _drop_small(line, MIN_LINE_AREA)
+    _, ids, stats, _ = cv2.connectedComponentsWithStats(line.astype(np.uint8), connectivity=8)
+    # Compact freckles and sand grain are not printed strokes.
+    keep = np.maximum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]) >= MIN_LINE_EXTENT
+    keep[0] = False
+    return keep[ids], ink.astype(bool)
 
 
 def _drop_small(mask: np.ndarray, min_area: int) -> np.ndarray:

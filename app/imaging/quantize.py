@@ -139,47 +139,40 @@ def _atlas(flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _pick_palette(atlas: np.ndarray, weights: np.ndarray, k: int) -> np.ndarray:
-    """대신할 색이 없는 후보부터 팔레트에 넣는다.
+    """Select supported, distinct colours with real light/dark anchors.
 
-    두 바퀴를 돈다. 첫 바퀴의 기준선은 MIN_CONTENT_DISTANCE로, "이만큼 떨어져 있으면
-    이웃 색으로 대신 칠할 수 없다"는 뜻이다. 여기서 걸리는 색은 팔레트에 없으면
-    그림에서 통째로 사라지므로 먼저 자리를 준다. 두 번째 바퀴는 남은 자리로 이미
-    대신할 색이 있는 자리의 오차를 줄인다 — 하늘 사진처럼 매끄러운 그라데이션은
-    첫 바퀴가 다섯 색이면 다 덮어버려서, 사용자가 요청한 k색을 채우려면 이 바퀴가 있어야
-    한다(실측: 구름 사진의 6~11번째 색이 전부 여기서 나온다).
-
-    1라운드는 면적 가중 gain을 쓰지 않는다. gain을 쓰면 그림의 0.67%뿐인 흰자·치아·
-    셔츠가 매 라운드 더 넓은 배경 그라데이션 색에 밀려 아예 안 뽑힌다(실측: spongebob
-    k=11에서 밝은 색이 하나도 안 들어오고 흰자가 khaki로 표현됨). 대신 "대신할 색이
-    없고(모든 선택색과 MIN_CONTENT_DISTANCE 밖) 잡티가 아닌(noise_floor 초과)" 후보를
-    면적 큰 순으로 채운다.
-
-    2라운드는 그대로 남은 자리로 '보이는 오차'(MIN_PALETTE_DISTANCE 초과분)를 줄인다.
-    이미 고른 색과 MIN_PALETTE_DISTANCE 안에 드는 후보는 어느 라운드든 못 고른다.
+    Area has a sublinear weight, so a large gradient cannot spend every slot
+    before small bright or dark interiors receive a representative colour.
     """
     distances = np.linalg.norm(atlas[:, None] - atlas[None, :], axis=-1)
     nearest = np.full(len(atlas), np.inf)
     chosen: list[int] = []
 
-    noise_floor = max(50.0, 0.002 * float(weights.sum()))
+    # Start from the dominant candidate, then favour distinct supported colours.
+    # Raw area ranking spent slots on several background tones before black.
+    first = int(np.argmax(weights))
+    chosen.append(first)
+    nearest = distances[first].copy()
+    support = np.power(weights, 0.25)
+    supported = weights >= max(float(weights.sum()) * 0.0005, 1.0)
+    # Supported luminance extremes anchor actual light/dark content; do not
+    # synthesize white or black. Interior eyes and ink otherwise lose to the
+    # many chromatic candidates in a large textured background.
+    supported[first] = True
+    supported_ids = np.flatnonzero(supported)
+    for extreme in (supported_ids[np.argmax(atlas[supported_ids, 0])],
+                    supported_ids[np.argmin(atlas[supported_ids, 0])]):
+        if len(chosen) < k and nearest[extreme] > MIN_CONTENT_DISTANCE:
+            chosen.append(int(extreme))
+            nearest = np.minimum(nearest, distances[extreme])
     while len(chosen) < k:
-        eligible = (nearest > MIN_CONTENT_DISTANCE) & (weights > noise_floor)
-        eligible[chosen] = False
-        if not eligible.any():
-            break
-        best = int(np.argmax(np.where(eligible, weights, -1.0)))
-        chosen.append(best)
-        nearest = np.minimum(nearest, distances[best])
-
-    while len(chosen) < k:
-        before = np.maximum(nearest - MIN_PALETTE_DISTANCE, 0)
-        after = np.maximum(np.minimum(nearest[None, :], distances) - MIN_PALETTE_DISTANCE, 0)
-        gains = (weights[None, :] * (before[None, :] - after)).sum(axis=1)
-        gains[nearest < MIN_PALETTE_DISTANCE] = 0
-        gains[chosen] = 0
-
-        best = int(np.argmax(gains))
-        if gains[best] <= 0:
+        # A candidate's own unsupported colour matters; summing gains across
+        # all background candidates drowned out small white/black interiors.
+        score = np.maximum(nearest - MIN_PALETTE_DISTANCE, 0) * support
+        score[~supported] = 0
+        score[chosen] = 0
+        best = int(np.argmax(score))
+        if score[best] <= 0:
             break
         chosen.append(best)
         nearest = np.minimum(nearest, distances[best])

@@ -14,6 +14,7 @@ from app.imaging.boundary import reassign_uncertain
 from app.imaging.contours import extract_contours, extract_seams
 from app.imaging.denoise import denoise_label_map
 from app.imaging.lineart import detect_line_layer
+from app.imaging.faces import finalize_faces
 from app.imaging.numbering import Region, assign_numbers
 from app.imaging.quantize import drop_unused_colors, quantize_colors
 from app.imaging.regionmerge import merge_by_edge_evidence
@@ -134,7 +135,15 @@ def generate_design(
     tick("merge_small", t0)
     if debug:
         _debug.dump_regions(debug_dir / "04_regions_merged.png", region_map)
+    regions_after_small = len(region_labels)
+    if line_mask is not None:
+        region_map, region_labels = finalize_faces(region_map, region_labels, line_mask)
     region_labels, palette = drop_unused_colors(region_labels, palette)
+
+    if debug:
+        np.savez_compressed(debug_dir / "final_arrays.npz", region_map=region_map,
+                            region_labels=region_labels, palette=palette,
+                            line_mask=line_mask if line_mask is not None else np.zeros(rgb.shape[:2], bool))
 
     t0 = time.time()
     contours_by_region = extract_contours(region_map)
@@ -145,9 +154,9 @@ def generate_design(
     preview_path = output_dir / "preview.png"
     outline_path = output_dir / "outline.png"
 
-    render_preview_image(region_map, region_labels, palette, line_mask).save(preview_path)
+    render_preview_image(region_map, region_labels, palette, line_mask, rgb).save(preview_path)
     outline_image, number_log = render_outline_image(
-        rgb.shape[:2], seams, regions, palette, line_mask
+        rgb.shape[:2], seams, regions, palette, line_mask, rgb, output_dir / "details.png"
     )
     outline_image.save(outline_path)
     tick("total", started)
@@ -162,7 +171,7 @@ def generate_design(
             {
                 "segment": regions_after_segment,
                 "edge_merge": regions_after_edge_merge,
-                "merge_small": len(region_labels),
+                "merge_small": regions_after_small,
                 "final": len(regions),
             },
             region_map, regions, palette, number_log,

@@ -31,11 +31,9 @@ MERGED_ERROR_MAX = 8.0
 # 한 영역이 연쇄 병합으로 누적할 수 있는 평균 오차(dE) 상한
 CUM_ERROR_MAX = 25.0
 
-# 이 반지름 원이 안 들어가는 영역은 가는 물체/선 후보 — 근거 약해도 병합 대상에서 뺀다
+# 가는 영역은 실제 경계 근거가 있을 때 보호한다. 경계 근거 없는 얇은 띠는 병합한다.
 THIN_RADIUS = 4
 
-# 경계가 이 비율 이상 검출된 선 위에 놓이면 그 경계는 선이 담당 — 병합하지 않음
-ON_LINE_FRAC_MAX = 0.25
 
 
 def merge_by_edge_evidence(
@@ -66,7 +64,13 @@ def merge_by_edge_evidence(
         border_len = len(ys)
         if border_len < 12:
             continue
-        edge_vals = grad_max[ys, xs]
+        # Printed ink already preserves this boundary. Measure the exposed
+        # boundary separately: a flower and a gradient band can share the same
+        # pair of colour regions. Pooling them protected the entire false band.
+        exposed = ~line_near[ys, xs]
+        if exposed.sum() < 12:
+            continue
+        edge_vals = grad_max[ys[exposed], xs[exposed]]
         p90 = float(np.percentile(edge_vals, 90))
         strong_frac = float((edge_vals > STRONG_GRAD).mean())
         on_line = float(line_near[ys, xs].mean())
@@ -76,15 +80,13 @@ def merge_by_edge_evidence(
         is_gradient_band = p90 < GRADIENT_BAND_P90 and strong_frac < GRADIENT_BAND_STRONG_FRAC
 
         reason = None
-        if on_line > ON_LINE_FRAC_MAX:
-            reason = "boundary on printed line"
-        elif strong_frac > STRONG_FRAC_MAX:
+        if strong_frac > STRONG_FRAC_MAX:
             reason = "real edge on >15% of border"
-        elif thin[a] or thin[b]:
-            reason = "thin region (stroke/thin object)"
         elif is_gradient_band:
             if merged_err > GRADIENT_MERGE_ERROR_MAX:
                 reason = "gradient band error too high"
+        elif thin[a] or thin[b]:
+            reason = "thin region with boundary evidence"
         elif p90 > max(EDGE_P90_MAX, interior * 1.3):
             reason = "edge sharper than region interiors"
         elif merged_err > MERGED_ERROR_MAX:
@@ -139,10 +141,9 @@ def merge_by_edge_evidence(
 
 
 def _multiscale_gradient(lab: np.ndarray) -> np.ndarray:
-    """여러 흐림 스케일의 LAB gradient 중 최대. JPEG 질감·완만한 램프에서는 작고,
-    흐린 실제 경계에서도 큰 스케일에서 살아남는다."""
+    """Measure gradients after smoothing JPEG grain at two scales."""
     out = None
-    for sigma in (0.0, 1.0, 2.0):
+    for sigma in (1.5, 3.0):
         src = lab if sigma == 0 else cv2.GaussianBlur(lab, (0, 0), sigma)
         gx = cv2.Sobel(src, cv2.CV_64F, 1, 0, ksize=3)
         gy = cv2.Sobel(src, cv2.CV_64F, 0, 1, ksize=3)
@@ -163,8 +164,9 @@ def _region_means(region_map: np.ndarray, lab: np.ndarray, count: int) -> np.nda
 
 def _region_interior_variation(region_map: np.ndarray, grad_max: np.ndarray, count: int) -> np.ndarray:
     """영역 내부(경계 제외)의 gradient 중앙값. 질감이 거친 영역은 이 값이 크다."""
-    eroded = cv2.erode((region_map >= 0).astype(np.uint8), np.ones((3, 3), np.uint8))
-    same = eroded.astype(bool)
+    field = region_map.astype(np.float32)
+    kernel = np.ones((5, 5), np.uint8)
+    same = cv2.erode(field, kernel) == cv2.dilate(field, kernel)
     flat = region_map.ravel()
     g = grad_max.ravel()
     out = np.zeros(count)

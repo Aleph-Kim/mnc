@@ -148,6 +148,7 @@ def dump_summary(
         "palette_dE_matrix": np.round(distances, 1).tolist(),
         "numbers_placed": sum(1 for r in per_region if r["number_drawn"]),
         "numbers_internal": sum(1 for r in per_region if r["number_kind"] == "internal"),
+        "numbers_detail": sum(1 for r in per_region if r["number_kind"] == "detail"),
         "numbers_external": sum(1 for r in per_region if r["number_kind"] == "external"),
         "numbers_skipped": sum(1 for r in per_region if not r["number_drawn"]),
         "numbers_skipped_by_reason": reasons,

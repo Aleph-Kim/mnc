@@ -27,6 +27,11 @@
 <div id="design-status" class="space-y-6">
   <p class="text-green-600 font-medium">완료되었습니다.</p>
 
+  {% if has_details %}
+  <p class="text-sm text-slate-600">작은 칸의 번호는 확대 상세도에서 확인하세요.
+    <a class="text-indigo-600 hover:underline" href="/storage/outputs/{{ design.id }}/details.png" target="_blank" rel="noopener">확대 상세도 열기</a>
+  </p>
+  {% endif %}
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
     <div>
       <h2 class="text-sm font-medium text-slate-600 mb-2">도안 이미지</h2>

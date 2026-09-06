@@ -88,7 +88,7 @@ def merge_small_regions(
     개별 조건으로 거르면 잎맥처럼 똑같이 생긴 선이 수백 개인 그림에서 전부 통과한다.
     """
     count = len(region_labels)
-    if count == 0:
+    if count <= 1:
         return region_map, region_labels
 
     owners, neighbours, shared = _shared_borders(region_map, count)
