@@ -54,7 +54,9 @@ ATLAS_COLORS = 128
 ATLAS_SAMPLE = 60000
 
 
-def quantize_colors(image: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+def quantize_colors(
+    image: np.ndarray, k: int, trace: list | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """이미지에 실제로 있는 색만 골라 팔레트를 만들고 k색으로 나눈다.
 
     두 가지를 따로 정한다. 어떤 색이 후보가 될 자격이 있는가(평탄한 자리의 색만)와,
@@ -81,8 +83,11 @@ def quantize_colors(image: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
 
     atlas, weights = _atlas(flat)
     centers = _pick_palette(atlas, weights, k)
+    _record(trace, "pick", centers)
     centers = _refine(atlas, weights, centers)
+    _record(trace, "refine", centers)
     centers = _merge_indistinct(atlas, weights, centers)
+    _record(trace, "merge_indistinct", centers)
 
     label_map = _nearest(pixels, centers).reshape(height, width)
     used = np.unique(label_map)
@@ -91,7 +96,15 @@ def quantize_colors(image: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
         lookup[used] = np.arange(len(used))
         label_map, centers = lookup[label_map], centers[used]
 
-    return label_map, np.clip(np.round(to_rgb(centers)), 0, 255).astype(np.uint8)
+    palette = np.clip(np.round(to_rgb(centers)), 0, 255).astype(np.uint8)
+    _record(trace, "final", centers)
+    return label_map, palette
+
+
+def _record(trace: list | None, stage: str, centers: np.ndarray) -> None:
+    # 팔레트 색이 pick→refine→merge에서 얼마나 움직이는지 추적 (흰자 탁해짐 진단용)
+    if trace is not None:
+        trace.append((stage, np.round(to_rgb(centers)).astype(int).tolist()))
 
 
 def _flat_mask(image: np.ndarray) -> np.ndarray:

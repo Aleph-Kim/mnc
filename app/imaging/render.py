@@ -10,12 +10,20 @@ SWATCH_SIZE = 60
 
 
 def render_preview_image(
-    region_map: np.ndarray, region_labels: np.ndarray, palette: np.ndarray
+    region_map: np.ndarray,
+    region_labels: np.ndarray,
+    palette: np.ndarray,
+    line_mask: np.ndarray | None = None,
 ) -> Image.Image:
     # 색 라벨맵이 아니라 영역맵에서 칠한다. 라벨맵에는 병합으로 사라진 잔점이 그대로
     # 남아 있어서, 그걸로 미리보기를 만들면 윤곽선도 번호도 없는 색 얼룩이 보인다.
     # 즉 사용자가 번호대로 칠한 결과와 미리보기가 서로 다른 그림이 된다.
-    return Image.fromarray(palette[region_labels[region_map]], mode="RGB")
+    image = palette[region_labels[region_map]]
+    if line_mask is not None:
+        # 인쇄되는 원화 선을 얹는다 — 사용자가 칠하는 대상은 면뿐
+        image = image.copy()
+        image[line_mask] = (0, 0, 0)
+    return Image.fromarray(image, mode="RGB")
 
 
 def render_outline_image(
@@ -23,6 +31,7 @@ def render_outline_image(
     seams: list[np.ndarray],
     regions: list[Region],
     palette: np.ndarray,
+    line_mask: np.ndarray | None = None,
 ) -> tuple[Image.Image, list[int]]:
     """윤곽선 + 번호 + 팔레트 바를 합성한다. 실제로 번호를 찍은 영역 id 목록을 함께 돌려준다."""
     h, w = shape
@@ -52,6 +61,12 @@ def render_outline_image(
         draw.text((box[0], box[1]), text, fill="black", font=font)
         placed.append(box)
         drawn_ids.append(region.id)
+
+    if line_mask is not None:
+        # 원화 선을 맨 위에 얹어, 선과 겹치는 면 경계 seam을 덮는다 (이중선 방지)
+        painted = np.array(canvas)
+        painted[line_mask] = (0, 0, 0)
+        canvas = Image.fromarray(painted, mode="RGB")
 
     bar = _render_palette_bar(len(palette), palette, w)
     composed = Image.new("RGB", (w, h + bar.height), "white")

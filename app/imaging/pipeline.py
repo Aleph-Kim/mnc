@@ -6,8 +6,10 @@ import numpy as np
 
 from app.core.config import settings
 from app.imaging import _debug
+from app.imaging.boundary import reassign_uncertain
 from app.imaging.contours import extract_contours, extract_seams
 from app.imaging.denoise import denoise_label_map
+from app.imaging.lineart import detect_line_layer
 from app.imaging.numbering import Region, assign_numbers
 from app.imaging.quantize import drop_unused_colors, quantize_colors
 from app.imaging.render import render_outline_image, render_preview_image
@@ -45,7 +47,6 @@ def generate_design(
     process_max_dim: int = 1200,
     min_region_area: int = 400,
 ) -> DesignResult:
-    # mode(일러스트/사진): Phase 2+에서 선 처리·영역 단순화 정책을 분기. 지금은 저장만 됨
     bgr = cv2.imread(str(image_path))
     if bgr is None:
         raise ValueError(f"could not read image at {image_path}")
@@ -56,12 +57,30 @@ def generate_design(
     if settings.debug_pipeline:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-    label_map, palette = quantize_colors(rgb, color_count)
+    # 일러스트는 원화 선을 별도 레이어로 분리 — 선은 칠할 면이 아니라 인쇄되는 선
+    line_mask = None
+    if mode == "illustration":
+        line_mask, dark_mask = detect_line_layer(rgb)
+
+    trace: list = []
+    label_map, palette = quantize_colors(rgb, color_count, trace=trace)
     if settings.debug_pipeline:
         _debug.dump_label_map(debug_dir / "01_quantized.png", label_map, palette)
+        _debug.dump_palette_trace(debug_dir / "palette_trace.json", trace)
     label_map = denoise_label_map(label_map, palette)
     if settings.debug_pipeline:
         _debug.dump_label_map(debug_dir / "02_denoised.png", label_map, palette)
+
+    if line_mask is not None:
+        before = label_map
+        label_map = reassign_uncertain(label_map, line_mask, rgb)
+        if settings.debug_pipeline:
+            _debug.dump_line_layer(
+                debug_dir / "06_line_layer.png", rgb, dark_mask, line_mask
+            )
+            _debug.dump_boundary(
+                debug_dir / "07_boundary.png", before, label_map, palette
+            )
 
     region_map, region_labels = segment_regions(label_map)
     regions_after_segment = len(region_labels)
@@ -81,8 +100,10 @@ def generate_design(
     preview_path = output_dir / "preview.png"
     outline_path = output_dir / "outline.png"
 
-    render_preview_image(region_map, region_labels, palette).save(preview_path)
-    outline_image, drawn_ids = render_outline_image(rgb.shape[:2], seams, regions, palette)
+    render_preview_image(region_map, region_labels, palette, line_mask).save(preview_path)
+    outline_image, drawn_ids = render_outline_image(
+        rgb.shape[:2], seams, regions, palette, line_mask
+    )
     outline_image.save(outline_path)
 
     if settings.debug_pipeline:

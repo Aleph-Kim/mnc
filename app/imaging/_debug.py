@@ -49,6 +49,40 @@ def dump_number_overlay(
     canvas.save(path)
 
 
+def dump_line_layer(
+    path: Path, rgb: np.ndarray, dark_mask: np.ndarray, line_mask: np.ndarray
+) -> None:
+    # 원본을 흐리게 깔고 선(빨강)과 면으로 빠진 어두운 덩어리(초록)를 겹쳐 분리 결과를 본다
+    canvas = (rgb.astype(np.float32) * 0.3 + 255 * 0.7).astype(np.uint8)
+    canvas[dark_mask & ~line_mask] = (0, 170, 0)
+    canvas[line_mask] = (220, 0, 0)
+    Image.fromarray(canvas, mode="RGB").save(path)
+
+
+def dump_boundary(
+    path: Path,
+    before: np.ndarray,
+    after: np.ndarray,
+    palette: np.ndarray,
+) -> None:
+    # 왼쪽=재배정 전, 오른쪽=재배정 후(바뀐 픽셀 자홍). 실루엣 halo가 사라졌는지 확인
+    left = palette[before]
+    right = palette[after].copy()
+    right[before != after] = (255, 0, 255)
+    Image.fromarray(np.concatenate([left, right], axis=1), mode="RGB").save(path)
+
+
+def dump_palette_trace(path: Path, trace: list) -> None:
+    path.write_text(
+        json.dumps(
+            [{"stage": stage, "colors": colors} for stage, colors in trace],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def dump_summary(
     path: Path,
     stages: dict[str, int],
