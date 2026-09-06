@@ -17,6 +17,7 @@ class Design:
     original_image_path: str
     status: str
     color_count: int
+    mode: str = "illustration"
     recommended_colors: int | None = None
     outline_image_path: str | None = None
     preview_image_path: str | None = None

@@ -1,9 +1,13 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class DesignCreateRequest(BaseModel):
     image_id: str
     color_count: int
+    mode: Literal["illustration", "photo"] = "illustration"
+    recommended_colors: int | None = None
 
 
 class DesignCreateResponse(BaseModel):

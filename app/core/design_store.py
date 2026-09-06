@@ -14,6 +14,7 @@ def create(
     image_id: str,
     original_image_path: str,
     color_count: int,
+    mode: str = "illustration",
     recommended_colors: int | None = None,
 ) -> Design:
     now = datetime.now(timezone.utc)
@@ -23,6 +24,7 @@ def create(
         original_image_path=original_image_path,
         status=DesignStatus.PENDING.value,
         color_count=color_count,
+        mode=mode,
         recommended_colors=recommended_colors,
         created_at=now,
         updated_at=now,

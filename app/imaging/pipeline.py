@@ -4,6 +4,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.core.config import settings
+from app.imaging import _debug
 from app.imaging.contours import extract_contours, extract_seams
 from app.imaging.denoise import denoise_label_map
 from app.imaging.numbering import Region, assign_numbers
@@ -39,33 +41,66 @@ def generate_design(
     image_path: Path,
     color_count: int,
     output_dir: Path,
+    mode: str = "illustration",
     process_max_dim: int = 1200,
     min_region_area: int = 400,
 ) -> DesignResult:
+    # mode(일러스트/사진): Phase 2+에서 선 처리·영역 단순화 정책을 분기. 지금은 저장만 됨
     bgr = cv2.imread(str(image_path))
     if bgr is None:
         raise ValueError(f"could not read image at {image_path}")
     rgb = cv2.cvtColor(_resize_to_working_dim(bgr, process_max_dim), cv2.COLOR_BGR2RGB)
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+    debug_dir = output_dir / "debug"
+    if settings.debug_pipeline:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
     label_map, palette = quantize_colors(rgb, color_count)
+    if settings.debug_pipeline:
+        _debug.dump_label_map(debug_dir / "01_quantized.png", label_map, palette)
     label_map = denoise_label_map(label_map, palette)
+    if settings.debug_pipeline:
+        _debug.dump_label_map(debug_dir / "02_denoised.png", label_map, palette)
 
     region_map, region_labels = segment_regions(label_map)
+    regions_after_segment = len(region_labels)
+    if settings.debug_pipeline:
+        _debug.dump_regions(debug_dir / "03_regions_raw.png", region_map)
     region_map, region_labels = merge_small_regions(
         region_map, region_labels, palette, min_area=min_region_area
     )
+    if settings.debug_pipeline:
+        _debug.dump_regions(debug_dir / "04_regions_merged.png", region_map)
     region_labels, palette = drop_unused_colors(region_labels, palette)
 
     contours_by_region = extract_contours(region_map)
     seams = extract_seams(region_map)
     regions = assign_numbers(region_map, region_labels, palette, contours_by_region)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     preview_path = output_dir / "preview.png"
     outline_path = output_dir / "outline.png"
 
     render_preview_image(region_map, region_labels, palette).save(preview_path)
-    render_outline_image(rgb.shape[:2], seams, regions, palette).save(outline_path)
+    outline_image, drawn_ids = render_outline_image(rgb.shape[:2], seams, regions, palette)
+    outline_image.save(outline_path)
+
+    if settings.debug_pipeline:
+        _debug.dump_number_overlay(
+            debug_dir / "05_number_overlay.png", rgb.shape[:2], seams, regions
+        )
+        _debug.dump_summary(
+            debug_dir / "summary.json",
+            {
+                "segment": regions_after_segment,
+                "merge": len(region_labels),
+                "final": len(regions),
+            },
+            region_map,
+            regions,
+            palette,
+            drawn_ids,
+        )
 
     return DesignResult(
         outline_image_path=outline_path,

@@ -11,6 +11,20 @@
 
   <form id="upload-form" class="space-y-4">
     <div>
+      <span class="block text-sm font-medium mb-1">이미지 종류</span>
+      <div class="flex gap-4 text-sm">
+        <label class="flex items-center gap-1.5">
+          <input type="radio" name="mode" value="illustration" checked />
+          일러스트 (그림·만화)
+        </label>
+        <label class="flex items-center gap-1.5">
+          <input type="radio" name="mode" value="photo" />
+          사진
+        </label>
+      </div>
+    </div>
+
+    <div>
       <label class="block text-sm font-medium mb-1" for="file-input">이미지 파일</label>
       <input
         id="file-input"
@@ -59,6 +73,7 @@
   const form = document.getElementById("upload-form");
 
   let currentImageId = null;
+  let currentRecommended = null;
 
   fileInput.addEventListener("change", async () => {
     const file = fileInput.files[0];
@@ -78,6 +93,7 @@
       const data = await res.json();
 
       currentImageId = data.image_id;
+      currentRecommended = data.recommended_colors;
       colorCountInput.value = data.recommended_colors;
       colorCountInput.disabled = false;
       recommendHint.textContent = `추천 색상 개수: ${data.recommended_colors} (직접 조정 가능, 5~30)`;
@@ -102,6 +118,8 @@
         body: JSON.stringify({
           image_id: currentImageId,
           color_count: parseInt(colorCountInput.value, 10),
+          recommended_colors: currentRecommended,
+          mode: form.mode.value,
         }),
       });
       if (!res.ok) throw new Error("도안 생성 요청에 실패했습니다.");

@@ -33,6 +33,8 @@ def create_design(
         image_id=payload.image_id,
         original_image_path=str(image_path),
         color_count=payload.color_count,
+        mode=payload.mode,
+        recommended_colors=payload.recommended_colors,
     )
 
     background_tasks.add_task(generate_design_task, design.id)

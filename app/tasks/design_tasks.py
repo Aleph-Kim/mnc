@@ -19,6 +19,7 @@ def generate_design_task(design_id: str) -> None:
             image_path=Path(design.original_image_path),
             color_count=design.color_count,
             output_dir=outputs_dir(design.id),
+            mode=design.mode,
         )
     except Exception as exc:
         design.status = DesignStatus.FAILED.value

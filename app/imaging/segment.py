@@ -51,7 +51,10 @@ def segment_regions(label_map: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     next_id = 0
     for color_label in np.unique(label_map):
         selected = label_map == color_label
-        count, components = cv2.connectedComponents(selected.astype(np.uint8), connectivity=8)
+        # 경계·두께 계산(_shared_borders, extract_seams의 crack 격자)이 전부 4-이웃
+        # 모델이라 영역 생성도 4-연결로 맞춘다. 8-연결은 대각선 한 점으로만 닿은 두
+        # 덩어리를 한 영역=한 번호로 묶어, 화면상 떨어져 보이는 칸에 번호가 하나만 생긴다
+        count, components = cv2.connectedComponents(selected.astype(np.uint8), connectivity=4)
         region_map[selected] = components[selected] - 1 + next_id
         region_labels.extend([int(color_label)] * (count - 1))
         next_id += count - 1

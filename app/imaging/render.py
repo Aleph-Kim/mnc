@@ -23,7 +23,8 @@ def render_outline_image(
     seams: list[np.ndarray],
     regions: list[Region],
     palette: np.ndarray,
-) -> Image.Image:
+) -> tuple[Image.Image, list[int]]:
+    """윤곽선 + 번호 + 팔레트 바를 합성한다. 실제로 번호를 찍은 영역 id 목록을 함께 돌려준다."""
     h, w = shape
     canvas = Image.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(canvas)
@@ -33,6 +34,8 @@ def render_outline_image(
         if len(seam) >= 2:
             draw.line([tuple(int(v) for v in p) for p in seam], fill="black", width=1)
 
+    placed: list[tuple[float, float, float, float]] = []
+    drawn_ids: list[int] = []
     for region in regions:
         text = str(region.number)
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -42,13 +45,25 @@ def render_outline_image(
         if math.hypot(tw, th) / 2 > region.label_radius:
             continue
         cx, cy = region.label_anchor
-        draw.text((cx - tw / 2, cy - th / 2), text, fill="black", font=font)
+        box = (cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2)
+        # 이미 찍은 번호와 겹치면 두 번호가 서로 읽히지 않으므로 생략 (재배치는 후속 단계)
+        if any(_boxes_overlap(box, other) for other in placed):
+            continue
+        draw.text((box[0], box[1]), text, fill="black", font=font)
+        placed.append(box)
+        drawn_ids.append(region.id)
 
     bar = _render_palette_bar(len(palette), palette, w)
     composed = Image.new("RGB", (w, h + bar.height), "white")
     composed.paste(bar, (0, 0))
     composed.paste(canvas, (0, bar.height))
-    return composed
+    return composed, drawn_ids
+
+
+def _boxes_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
 def _render_palette_bar(color_count: int, palette: np.ndarray, width: int) -> Image.Image:
