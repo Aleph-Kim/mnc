@@ -18,11 +18,15 @@ INK_CONTRAST = 12.0
 CHROMA_MAX = 26.0
 
 # 이 반지름 원이 들어가는 어두운 덩어리는 선이 아니라 면 (동공·신발)
-MAX_LINE_HALFWIDTH = 2
+MAX_LINE_HALFWIDTH = 4
 
 # 면으로 뺄 덩어리의 최소 넓이. 벨트·눈썹처럼 촘촘한 선 뭉치가 opening을 통과해도
 # 넓이가 작아 여기서 걸리고 선으로 남는다
-MIN_FILL_AREA = 120
+MIN_FILL_AREA = 150
+
+# opening 통과 덩어리를 "면"으로 인정할 조건: 자기 bbox를 이 비율 이상 채워야 한다.
+# 외곽선 고리는 bbox가 크고 속이 비어 이 값을 못 넘어 선으로 남는다(굵은 구간 포함)
+FILL_BBOX_RATIO = 0.55
 
 # 이보다 작은 부스러기(JPEG 잡티)는 선으로 치지 않는다
 MIN_LINE_AREA = 25
@@ -53,7 +57,7 @@ def detect_line_layer(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         cv2.MORPH_ELLIPSE, (2 * MAX_LINE_HALFWIDTH + 1, 2 * MAX_LINE_HALFWIDTH + 1)
     )
     opened = cv2.dilate(cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel), np.ones((3, 3), np.uint8))
-    is_fill = _keep_large(opened.astype(bool), MIN_FILL_AREA)
+    is_fill = _compact_blobs(opened.astype(bool), MIN_FILL_AREA, FILL_BBOX_RATIO)
 
     line = ink.astype(bool) & ~is_fill
     line = cv2.morphologyEx(
@@ -63,13 +67,25 @@ def detect_line_layer(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _drop_small(mask: np.ndarray, min_area: int) -> np.ndarray:
-    return _keep_large(mask, min_area)
-
-
-def _keep_large(mask: np.ndarray, min_area: int) -> np.ndarray:
     _, components, stats, _ = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8
     )
     keep = stats[:, cv2.CC_STAT_AREA] >= min_area
     keep[0] = False
+    return keep[components]
+
+
+def _compact_blobs(mask: np.ndarray, min_area: int, bbox_ratio: float) -> np.ndarray:
+    """자기 bbox를 꽉 채우는(속이 안 빈) 큰 덩어리만 True — 동공·신발.
+
+    외곽선은 연결요소가 커도 bbox 대비 속이 비어 걸러진다. 그래서 굵은 외곽선 구간도
+    선으로 남고, 같은 윤곽선이 구간마다 선/면으로 갈리지 않는다.
+    """
+    n, components, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n, dtype=bool)
+    for c in range(1, n):
+        area = stats[c, cv2.CC_STAT_AREA]
+        bbox = stats[c, cv2.CC_STAT_WIDTH] * stats[c, cv2.CC_STAT_HEIGHT]
+        if area >= min_area and bbox > 0 and area / bbox >= bbox_ratio:
+            keep[c] = True
     return keep[components]

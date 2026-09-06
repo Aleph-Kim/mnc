@@ -55,7 +55,7 @@ ATLAS_SAMPLE = 60000
 
 
 def quantize_colors(
-    image: np.ndarray, k: int, trace: list | None = None
+    image: np.ndarray, k: int, trace: list | None = None, legacy_pick: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
     """이미지에 실제로 있는 색만 골라 팔레트를 만들고 k색으로 나눈다.
 
@@ -82,7 +82,7 @@ def quantize_colors(
         flat = pixels
 
     atlas, weights = _atlas(flat)
-    centers = _pick_palette(atlas, weights, k)
+    centers = _pick_palette_legacy(atlas, weights, k) if legacy_pick else _pick_palette(atlas, weights, k)
     _record(trace, "pick", centers)
     centers = _refine(atlas, weights, centers)
     _record(trace, "refine", centers)
@@ -148,28 +148,61 @@ def _pick_palette(atlas: np.ndarray, weights: np.ndarray, k: int) -> np.ndarray:
     첫 바퀴가 다섯 색이면 다 덮어버려서, 사용자가 요청한 k색을 채우려면 이 바퀴가 있어야
     한다(실측: 구름 사진의 6~11번째 색이 전부 여기서 나온다).
 
-    어느 바퀴든 이미 고른 색과 MIN_PALETTE_DISTANCE 안에 드는 후보는 못 고른다.
-    '보이는 오차'만 세도 그런 후보의 이득이 0이 되지는 않기 때문이다. 중간에 낀 색들의
-    오차를 조금씩 줄여주는 값이 쌓여서, 옥토캣에서는 그림의 0.6%를 dE 0.9만큼
-    개선하는 색이 슬롯을 가져갔다(실측: 그 결과 2색이어야 할 팔레트가 5색이 됐다).
+    1라운드는 면적 가중 gain을 쓰지 않는다. gain을 쓰면 그림의 0.67%뿐인 흰자·치아·
+    셔츠가 매 라운드 더 넓은 배경 그라데이션 색에 밀려 아예 안 뽑힌다(실측: spongebob
+    k=11에서 밝은 색이 하나도 안 들어오고 흰자가 khaki로 표현됨). 대신 "대신할 색이
+    없고(모든 선택색과 MIN_CONTENT_DISTANCE 밖) 잡티가 아닌(noise_floor 초과)" 후보를
+    면적 큰 순으로 채운다.
+
+    2라운드는 그대로 남은 자리로 '보이는 오차'(MIN_PALETTE_DISTANCE 초과분)를 줄인다.
+    이미 고른 색과 MIN_PALETTE_DISTANCE 안에 드는 후보는 어느 라운드든 못 고른다.
     """
     distances = np.linalg.norm(atlas[:, None] - atlas[None, :], axis=-1)
     nearest = np.full(len(atlas), np.inf)
     chosen: list[int] = []
 
+    noise_floor = max(50.0, 0.002 * float(weights.sum()))
+    while len(chosen) < k:
+        eligible = (nearest > MIN_CONTENT_DISTANCE) & (weights > noise_floor)
+        eligible[chosen] = False
+        if not eligible.any():
+            break
+        best = int(np.argmax(np.where(eligible, weights, -1.0)))
+        chosen.append(best)
+        nearest = np.minimum(nearest, distances[best])
+
+    while len(chosen) < k:
+        before = np.maximum(nearest - MIN_PALETTE_DISTANCE, 0)
+        after = np.maximum(np.minimum(nearest[None, :], distances) - MIN_PALETTE_DISTANCE, 0)
+        gains = (weights[None, :] * (before[None, :] - after)).sum(axis=1)
+        gains[nearest < MIN_PALETTE_DISTANCE] = 0
+        gains[chosen] = 0
+
+        best = int(np.argmax(gains))
+        if gains[best] <= 0:
+            break
+        chosen.append(best)
+        nearest = np.minimum(nearest, distances[best])
+
+    return atlas[chosen].copy()
+
+
+def _pick_palette_legacy(atlas: np.ndarray, weights: np.ndarray, k: int) -> np.ndarray:
+    """ablation 비교용 — 이전(면적 가중 gain 2라운드) 방식."""
+    distances = np.linalg.norm(atlas[:, None] - atlas[None, :], axis=-1)
+    nearest = np.full(len(atlas), np.inf)
+    chosen: list[int] = []
     for floor in (MIN_CONTENT_DISTANCE, MIN_PALETTE_DISTANCE):
         while len(chosen) < k:
             before = np.maximum(nearest - floor, 0)
             after = np.maximum(np.minimum(nearest[None, :], distances) - floor, 0)
             gains = (weights[None, :] * (before[None, :] - after)).sum(axis=1)
             gains[nearest < MIN_PALETTE_DISTANCE] = 0
-
             best = int(np.argmax(gains))
             if gains[best] <= 0:
                 break
             chosen.append(best)
             nearest = np.minimum(nearest, distances[best])
-
     return atlas[chosen].copy()
 
 

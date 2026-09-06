@@ -92,6 +92,9 @@ def merge_small_regions(
         return region_map, region_labels
 
     owners, neighbours, shared = _shared_borders(region_map, count)
+    # 맞닿은 영역 쌍이 없으면(단색 이미지 등) 흡수시킬 이웃이 없다
+    if len(owners) == 0:
+        return region_map, region_labels
     starts = np.searchsorted(owners, np.arange(count))
     ends = np.searchsorted(owners, np.arange(count), side="right")
 

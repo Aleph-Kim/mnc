@@ -27,10 +27,13 @@ def dump_regions(path: Path, region_map: np.ndarray) -> None:
 
 
 def dump_number_overlay(
-    path: Path, shape: tuple[int, int], seams: list[np.ndarray], regions: list[Region]
+    path: Path,
+    shape: tuple[int, int],
+    seams: list[np.ndarray],
+    regions: list[Region],
+    placed: set[int],
 ) -> None:
-    # 윤곽선 위에 각 영역의 번호 위치·여유 반지름·id를 겹쳐 찍는다. "빈 곳에 찍힌 번호"가
-    # 거대 영역의 정상 배치인지 좌표 버그인지, 같은 번호 중복이 과분할 탓인지 확인용
+    # 실제로 찍힌 번호(파랑)와 생략된 번호(빨강, 사유는 number_log.json)를 윤곽선 위에 겹친다
     h, w = shape
     canvas = Image.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(canvas)
@@ -42,9 +45,8 @@ def dump_number_overlay(
 
     for region in regions:
         cx, cy = region.label_anchor
-        r = region.label_radius
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline="red")
-        draw.text((cx + 2, cy + 2), f"{region.number}#{region.id}", fill="blue", font=font)
+        colour = "blue" if region.id in placed else "red"
+        draw.text((cx + 2, cy + 2), f"{region.number}#{region.id}", fill=colour, font=font)
 
     canvas.save(path)
 
@@ -83,22 +85,40 @@ def dump_palette_trace(path: Path, trace: list) -> None:
     )
 
 
+def dump_merge_log(path: Path, merge_log: list[dict]) -> None:
+    merged = [c for c in merge_log if c.get("merge")]
+    rejected = [c for c in merge_log if not c.get("merge")]
+    reasons: dict[str, int] = {}
+    for c in rejected:
+        reasons[c.get("reject_reason") or "?"] = reasons.get(c.get("reject_reason") or "?", 0) + 1
+    path.write_text(
+        json.dumps(
+            {"candidates": len(merge_log), "merged": len(merged),
+             "rejected_by_reason": reasons, "detail": merge_log},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def dump_summary(
     path: Path,
     stages: dict[str, int],
     region_map: np.ndarray,
     regions: list[Region],
     palette: np.ndarray,
-    drawn_ids: list[int],
+    number_log: list[dict],
+    extra: dict | None = None,
 ) -> None:
     areas = np.bincount(region_map[region_map >= 0].ravel())
-    drawn = set(drawn_ids)
+    by_id = {e["id"]: e for e in number_log}
 
     per_region = []
     for region in regions:
         pts = np.array(region.points)
         x0, y0 = pts.min(axis=0).tolist()
         x1, y1 = pts.max(axis=0).tolist()
+        entry = by_id.get(region.id, {})
         per_region.append(
             {
                 "id": region.id,
@@ -108,19 +128,30 @@ def dump_summary(
                 "bbox": [x0, y0, x1, y1],
                 "anchor": list(region.label_anchor),
                 "radius": round(region.label_radius, 1),
-                "number_drawn": region.id in drawn,
+                "number_drawn": entry.get("placed", False),
+                "number_kind": entry.get("kind"),
+                "number_reason": entry.get("reason"),
             }
         )
 
     distances = palette_distances(palette)
     off_diag = distances[~np.eye(len(palette), dtype=bool)]
+    reasons: dict[str, int] = {}
+    for r in per_region:
+        if not r["number_drawn"]:
+            reasons[r["number_reason"] or "?"] = reasons.get(r["number_reason"] or "?", 0) + 1
 
     summary = {
         "region_count": stages,
         "palette_size": len(palette),
         "palette_min_dE": round(float(off_diag.min()), 2) if off_diag.size else None,
         "palette_dE_matrix": np.round(distances, 1).tolist(),
+        "numbers_placed": sum(1 for r in per_region if r["number_drawn"]),
+        "numbers_internal": sum(1 for r in per_region if r["number_kind"] == "internal"),
+        "numbers_external": sum(1 for r in per_region if r["number_kind"] == "external"),
         "numbers_skipped": sum(1 for r in per_region if not r["number_drawn"]),
+        "numbers_skipped_by_reason": reasons,
+        **(extra or {}),
         "regions": per_region,
     }
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
